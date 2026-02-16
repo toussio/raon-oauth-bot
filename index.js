@@ -103,7 +103,9 @@ client.on("interactionCreate", async (interaction) => {
   } catch (e) {
     console.error("❌ interactionCreate error:", e);
     if (interaction && !interaction.replied) {
-      await interaction.reply({ content: "오류가 발생했습니다. 관리자에게 문의하세요.", ephemeral: true }).catch(() => {});
+      await interaction
+        .reply({ content: "오류가 발생했습니다. 관리자에게 문의하세요.", ephemeral: true })
+        .catch(() => {});
     }
   }
 });
@@ -176,19 +178,15 @@ app.get("/auth/discord/callback", async (req, res) => {
       return res.redirect(`${fail}?reason=not_in_guild`);
     }
 
-    // 역할 추가
-   if (member.roles.cache.has(RESERVE_ROLE_ID)) {
-  const ok = SUCCESS_REDIRECT || SITE_URL;
-  return res.redirect(`${ok}?already=1`);
-}
-
-await member.roles.add(RESERVE_ROLE_ID, "사전예약 완료 역할 지급");
-
-const ok = SUCCESS_REDIRECT || SITE_URL;
-return res.redirect(`${ok}?ok=1`);
-
-
+    // ✅ 이미 사전예약(역할 있음) 이면 막기
     const ok = SUCCESS_REDIRECT || SITE_URL;
+
+    if (member.roles.cache.has(RESERVE_ROLE_ID)) {
+      return res.redirect(`${ok}?already=1`);
+    }
+
+    // ✅ 처음이면 역할 지급
+    await member.roles.add(RESERVE_ROLE_ID, "사전예약 완료 역할 지급");
     return res.redirect(`${ok}?ok=1`);
   } catch (err) {
     console.error("❌ OAuth callback error:", err);
@@ -222,4 +220,3 @@ const PORT = process.env.PORT || 3000;
   console.error("❌ FATAL:", e);
   process.exit(1);
 });
-
