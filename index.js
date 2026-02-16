@@ -1,7 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
 
 const {
   Client,
@@ -9,11 +7,11 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  PermissionFlagsBits,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle,
-  PermissionFlagsBits
+  ButtonStyle
 } = require("discord.js");
 
 const app = express();
@@ -25,8 +23,8 @@ const app = express();
  * CLIENT_SECRET
  * GUILD_ID
  * RESERVE_ROLE_ID
- * BASE_URL
- * SITE_URL
+ * BASE_URL    (예: https://raon-oauth-bot.onrender.com)
+ * SITE_URL    (예: https://line-taupe-seven.vercel.app/)
  * SUCCESS_REDIRECT (선택)
  * FAIL_REDIRECT    (선택)
  */
@@ -55,54 +53,32 @@ function need(v, name) {
   ["SITE_URL", SITE_URL]
 ].forEach(([n, v]) => need(v, n));
 
-// ✅ intents 최소
+/* =========================================================
+   ✅ CORS 허용 (사이트에서 /api/reserve-count 읽기 위해 필수)
+========================================================= */
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+/* =========================================================
+   ✅ 디스코드 클라이언트 (disallowed intents 방지)
+========================================================= */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// =====================================================
-// ✅ 사전예약 카운트 저장 (파일 기반)
-// =====================================================
-const DATA_DIR = path.join(process.cwd(), "data");
-const COUNT_FILE = path.join(DATA_DIR, "reserve_count.json");
-
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-function loadCount() {
-  try {
-    ensureDataDir();
-    if (!fs.existsSync(COUNT_FILE)) return 0;
-    const raw = fs.readFileSync(COUNT_FILE, "utf8");
-    const json = JSON.parse(raw);
-    return Number(json.count || 0);
-  } catch {
-    return 0;
-  }
-}
-
-function saveCount(count) {
-  ensureDataDir();
-  fs.writeFileSync(COUNT_FILE, JSON.stringify({ count }, null, 2), "utf8");
-}
-
-let reserveCount = loadCount();
-
-// ✅ 카운트 API (사이트에서 호출)
-app.get("/api/reserve-count", (req, res) => {
-  res.json({ count: reserveCount });
-});
-
-// -----------------------------
-// Slash Command Deploy
-// -----------------------------
+/* =========================================================
+   Slash Command Deploy (관리자만)
+========================================================= */
 async function deployCommands() {
   const cmd = new SlashCommandBuilder()
     .setName("사전예약")
     .setDescription("라온서버 사전예약 버튼을 띄웁니다.")
-    // ✅ 서버 관리 권한자만
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild) // ✅ 관리자만
     .setDMPermission(false);
 
   const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
@@ -114,18 +90,18 @@ async function deployCommands() {
   console.log("✅ Slash command deployed: /사전예약 (ManageGuild only)");
 }
 
-// -----------------------------
-// /사전예약 -> 임베드 + 사이트 링크 버튼
-// -----------------------------
+/* =========================================================
+   /사전예약 -> 임베드 + 사이트 링크 버튼
+========================================================= */
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== "사전예약") return;
 
-    // ✅ 추가 안전장치
+    // ✅ 이중 방어(혹시 퍼미션 반영 전에도 막기)
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
       return interaction.reply({
-        content: "❌ 이 명령어는 관리자(서버 관리 권한)만 사용할 수 있습니다.",
+        content: "❌ 이 명령어는 관리자만 사용할 수 있습니다.",
         ephemeral: true
       });
     }
@@ -134,7 +110,7 @@ client.on("interactionCreate", async (interaction) => {
       .setTitle("📌 라온서버 사전예약")
       .setDescription(
         "아래 버튼을 눌러 사전예약 페이지로 이동하세요.\n" +
-        "사이트에서 사전예약을 완료하면 디스코드 역할이 지급됩니다."
+          "사이트에서 사전예약을 완료하면 디스코드 역할이 자동 지급됩니다."
       );
 
     const row = new ActionRowBuilder().addComponents(
@@ -148,20 +124,37 @@ client.on("interactionCreate", async (interaction) => {
   } catch (e) {
     console.error("❌ interactionCreate error:", e);
     if (interaction && !interaction.replied) {
-      await interaction.reply({
-        content: "오류가 발생했습니다. 관리자에게 문의하세요.",
-        ephemeral: true
-      }).catch(() => {});
+      await interaction
+        .reply({ content: "오류가 발생했습니다. 관리자에게 문의하세요.", ephemeral: true })
+        .catch(() => {});
     }
   }
 });
 
-// -----------------------------
-// OAuth2: 시작
-// GET /auth/discord
-// -----------------------------
+/* =========================================================
+   ✅ API: 사전예약 인원수 (역할 가진 사람 수)
+   GET /api/reserve-count  -> { count: number }
+========================================================= */
+app.get("/api/reserve-count", async (req, res) => {
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const role = await guild.roles.fetch(RESERVE_ROLE_ID);
+    const count = role?.members?.size ?? 0;
+    return res.json({ count });
+  } catch (e) {
+    console.error("❌ reserve-count error:", e);
+    return res.status(500).json({ count: 0, error: "server_error" });
+  }
+});
+
+/* =========================================================
+   OAuth2 시작
+   GET /auth/discord
+========================================================= */
 app.get("/auth/discord", (req, res) => {
   const redirectUri = encodeURIComponent(`${BASE_URL}/auth/discord/callback`);
+
+  // ✅ identify만으로 유저 id 얻기
   const scope = encodeURIComponent("identify");
 
   const url =
@@ -174,10 +167,10 @@ app.get("/auth/discord", (req, res) => {
   return res.redirect(url);
 });
 
-// -----------------------------
-// OAuth2: 콜백
-// GET /auth/discord/callback
-// -----------------------------
+/* =========================================================
+   OAuth2 콜백
+   GET /auth/discord/callback
+========================================================= */
 app.get("/auth/discord/callback", async (req, res) => {
   try {
     const code = req.query.code;
@@ -191,7 +184,7 @@ app.get("/auth/discord/callback", async (req, res) => {
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
         grant_type: "authorization_code",
-        code: code,
+        code,
         redirect_uri: `${BASE_URL}/auth/discord/callback`
       })
     });
@@ -208,45 +201,46 @@ app.get("/auth/discord/callback", async (req, res) => {
     });
 
     const user = await userRes.json();
-    if (!user || !user.id) {
+    if (!user?.id) {
       console.error("❌ user:", user);
       throw new Error("Failed to fetch user");
     }
 
-    // 3) 멤버 확인
+    // 3) 멤버 확인 (서버에 있어야 역할 지급 가능)
     const guild = await client.guilds.fetch(GUILD_ID);
     const member = await guild.members.fetch(user.id).catch(() => null);
 
+    const okUrl = SUCCESS_REDIRECT || SITE_URL;
+    const failUrl = FAIL_REDIRECT || SITE_URL;
+
     if (!member) {
-      const fail = FAIL_REDIRECT || SITE_URL;
-      return res.redirect(`${fail}?reason=not_in_guild`);
+      return res.redirect(`${failUrl}?reason=not_in_guild`);
     }
 
-    const ok = SUCCESS_REDIRECT || SITE_URL;
-
-    // ✅ 이미 완료면 카운트 증가 X
+    // ✅ 이미 역할 있으면 already=1
     if (member.roles.cache.has(RESERVE_ROLE_ID)) {
-      return res.redirect(`${ok}?already=1`);
+      return res.redirect(`${okUrl}?already=1`);
     }
 
-    // ✅ 최초만 역할 지급 + 카운트 증가
+    // ✅ 역할 지급
     await member.roles.add(RESERVE_ROLE_ID, "사전예약 완료 역할 지급");
 
-    reserveCount += 1;
-    saveCount(reserveCount);
-
-    return res.redirect(`${ok}?ok=1`);
+    return res.redirect(`${okUrl}?ok=1`);
   } catch (err) {
     console.error("❌ OAuth callback error:", err);
-    const fail = FAIL_REDIRECT || SITE_URL;
-    return res.redirect(`${fail}?ok=0`);
+    const failUrl = FAIL_REDIRECT || SITE_URL;
+    return res.redirect(`${failUrl}?ok=0`);
   }
 });
 
-// Health check
+/* =========================================================
+   Health Check
+========================================================= */
 app.get("/", (req, res) => res.send("OK"));
 
-// Run
+/* =========================================================
+   Run
+========================================================= */
 const PORT = process.env.PORT || 3000;
 
 (async () => {
@@ -260,10 +254,8 @@ const PORT = process.env.PORT || 3000;
     console.log(`- OAuth start: ${BASE_URL}/auth/discord`);
     console.log(`- Callback:   ${BASE_URL}/auth/discord/callback`);
     console.log(`- Count API:  ${BASE_URL}/api/reserve-count`);
-    console.log(`- Loaded count: ${reserveCount}`);
   });
 })().catch((e) => {
   console.error("❌ FATAL:", e);
   process.exit(1);
 });
-
