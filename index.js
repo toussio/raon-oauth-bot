@@ -177,9 +177,16 @@ app.get("/auth/discord/callback", async (req, res) => {
     }
 
     // 역할 추가
-    if (!member.roles.cache.has(RESERVE_ROLE_ID)) {
-      await member.roles.add(RESERVE_ROLE_ID, "사전예약 완료 역할 지급");
-    }
+   if (member.roles.cache.has(RESERVE_ROLE_ID)) {
+  const ok = SUCCESS_REDIRECT || SITE_URL;
+  return res.redirect(`${ok}?already=1`);
+}
+
+await member.roles.add(RESERVE_ROLE_ID, "사전예약 완료 역할 지급");
+
+const ok = SUCCESS_REDIRECT || SITE_URL;
+return res.redirect(`${ok}?ok=1`);
+
 
     const ok = SUCCESS_REDIRECT || SITE_URL;
     return res.redirect(`${ok}?ok=1`);
@@ -215,3 +222,4 @@ const PORT = process.env.PORT || 3000;
   console.error("❌ FATAL:", e);
   process.exit(1);
 });
+
